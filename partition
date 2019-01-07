@@ -1,0 +1,214 @@
+#!/usr/bin/env python
+
+"""
+The MIT License (MIT)
+
+Copyright (c) 2019 Carl Londahl
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+THE SOFTWARE.
+"""
+
+import os
+import json
+import syslog
+import subprocess
+import argparse
+
+from rectpack import newPacker, PackingBin
+from hashlib import sha1
+
+# some graphical adjustments needed to make it
+# look properly
+border = 30
+screen = (3840 - 2 * border, 2160 - 3 * border - 80)
+
+# I only have one big-ass monitor. Therefore, this is fixed.
+# It is easy to retrieve the desktop which contains the mouse pointer
+# but this is left as an exercise to the reader.
+desktop = 0
+
+# this may be needed to be reconfigured
+xdotool_offset_error = 4, 58
+
+# in case we cannot pack the windows, the program
+# will identify some programs that can be minimized
+# to find a suitable packing.
+minimize_if_needed = ["spotify", "telegram"]
+layouts_config = "/home/carl/.config/gnoti/layouts.json"
+
+# for sending error somewhere
+devnull = open(os.devnull, 'wb')
+
+def notify(msg):
+    subprocess.call(["notify-send", "Layouts", str(msg)])
+
+def get_pos_and_size(id):
+    result = subprocess.check_output(["xdotool", "getwindowgeometry", id])
+    result = result.split("Position: ")[1].split("Geometry: ")
+    x, y = result[0].split(" (")[0].split(",")
+    width, height = result[1].strip().split("x")
+    return int(x), int(y), int(width), int(height)
+
+def get_size(id):
+    _, _, width, height = get_pos_and_size(id)
+    return width, height
+
+def move_window(id, x, y):
+    subprocess.call(["xdotool", "windowmove", str(id), str(x), str(y)])
+
+def resize_window(id, width, height):
+    subprocess.call(["xdotool", "windowsize", str(id), str(width), str(height)])
+
+def get_windows(desktop):
+    return subprocess.check_output([
+        "xdotool", "search", "--all", "--onlyvisible", "--desktop", str(desktop), ""
+    ], stderr=devnull).split()
+
+def get_name(id):
+    return subprocess.check_output(["xprop", "-id", str(id), "WM_CLASS"]).strip()
+
+def minimize(id):
+    subprocess.call(["xdotool", "windowminimize", str(id)])
+
+def find_minimizable():
+    for window_class in minimize_if_needed:
+        try:
+            return subprocess.check_output([
+                "xdotool", "search", "--onlyvisible", "--class", window_class
+            ]).strip().split()
+        except Exception as e:
+            continue
+    return list()
+
+def get_window_properties(visible_windows):
+    windows = []
+    for window in visible_windows:
+        x, y, width, height = get_pos_and_size(window)
+        windows.append((sha1(get_name(window)).hexdigest(), x, y, width, height))
+
+    digests = sorted(map(lambda x: x[0], windows))
+    fingerprint = sha1("".join(digests)).hexdigest()
+    return windows, fingerprint
+
+def learn_layout(visible_windows):
+    windows, fingerprint = get_window_properties(visible_windows)
+    try:
+        with open(layouts_config, "r") as layouts:
+            data = json.loads(layouts.read())
+    except:
+        data = dict()
+    try:
+        data[fingerprint] = windows
+        with open(layouts_config, "w+") as layouts:
+            layouts.write(json.dumps(data))
+        notify("Layout saved")
+    except:
+        syslog.syslog(syslog.LOG_ERR, "Failed to write to %s." % layouts_config)
+
+def apply_layout(visible_windows):
+    windows, fingerprint = get_window_properties(visible_windows)
+    try:
+        with open(layouts_config, "r") as layouts:
+            data = json.loads(layouts.read())
+        layout = data.get(fingerprint)
+        assert(layout is not None)
+    except:
+        return
+
+    visible_windows = get_windows(desktop)
+    for window in visible_windows:
+        window_fingerprint = sha1(get_name(window)).hexdigest()
+        # a bit inefficient, but we are not dealing with to many windows
+        e = filter(lambda x: x[0] == window_fingerprint, layout)[0]
+        layout.remove(e)
+        move_window(
+            window, 
+            e[1] - xdotool_offset_error[0], 
+            e[2] - xdotool_offset_error[1]
+        )
+        resize_window(window, e[3], e[4])
+
+def pack(visible_windows):
+    # create a representation of the screen and
+    # init the bin-packing algorithm.
+    packer = newPacker(rotation=False, bin_algo=PackingBin.BFF)
+    packer.add_bin(*screen)
+
+    # determine the visisble windows on the desktop
+    for window in visible_windows:
+        width, height = get_size(window)
+        dimension = (width + 3 * border, height + 4 * border)
+        packer.add_rect(*dimension, rid=window)
+
+    # try to perform packing of the windows
+    packer.pack()
+
+    # if we did not succeed, we will try to minimize
+    # some windows that are allowed to be minized.
+    while len(packer[0]) != len(packer._avail_rect):
+        minimizable_windows = find_minimizable()
+        # if no minimizable windows are found, we
+        # need not to attempt further.
+        if len(minimizable_windows) == 0:
+            break
+        # pick a window in the list and
+        # minimize it.
+        for window in minimizable_windows:
+            g = filter(lambda x: x[2] == window, list(packer._avail_rect))
+            packer._avail_rect.remove(g[0])
+            minimize(g[0][2])
+        packer.pack()
+
+    # apply final transformation to desktop
+    for p in packer[0]:
+        move_window(p.rid, p.x + 3 * border, p.y + 4 * border)
+
+def quantize(visible_windows):
+    def normalize(num, c):
+        return round(float(num) / border / c)  * border * c
+
+    for window in visible_windows:
+        x, y, width, height = get_pos_and_size(window)
+        x = normalize(x, 3) - xdotool_offset_error[0]
+        y = normalize(y, 3) - xdotool_offset_error[1]
+        width = normalize(width, 3)
+        height = normalize(height, 3)
+        move_window(window, x, y)
+        resize_window(window, width, height)
+
+parser = argparse.ArgumentParser(prog='gtile')
+parser.add_argument('--learn', action='store_true', help='learn current layout')
+parser.add_argument('--apply', action='store_true', help='apply layout to current windows')
+parser.add_argument('--pack', action='store_true', help='attempt to pack windows')
+parser.add_argument('--quantize', action='store_true', help='attempt to quantize windows')
+args = parser.parse_args()
+
+visible_windows = get_windows(desktop)
+
+if args.learn:
+    learn_layout(visible_windows)
+if args.apply:
+    apply_layout(visible_windows)
+if args.pack:
+    pack(visible_windows)
+if args.quantize:
+    quantize(visible_windows)
+
+# TODO: make the learning of layouts a bit more flexible. this can be achieved using
+# a proper machine-learning algorithm such as a neural net.
