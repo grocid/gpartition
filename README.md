@@ -23,7 +23,7 @@ which will snap the windows to a much sparser grid on the desktop.
 
 ![An example layout](img1.png)
 
-Here is another layout, consisting of a visible instance of Brace, one instance of Sublime Text and two terminals. This one has also been saved.
+Here is another layout, consisting of a visible instance of Brave, one instance of Sublime Text and two terminals. This one has also been saved.
 
 ![Another example layout](img2.png)
 
