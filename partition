@@ -175,9 +175,19 @@ def pack(visible_windows):
             minimize(g[0][2])
         packer.pack()
 
+    # get bounding box
+    mx, my = -1, -1
+    for p in packer[0]:
+    	mx = max(p.x + p.width, mx)
+    	my = max(p.y + p.height, my)
+
+   	# center bounding box
+    dx = (screen[0] - mx) / 2
+    dy = (screen[1] - my) / 2
+
     # apply final transformation to desktop
     for p in packer[0]:
-        move_window(p.rid, p.x + 3 * border, p.y + 4 * border)
+        move_window(p.rid, p.x + 3 * border + dx, p.y + 4 * border + dy)
 
 def quantize(visible_windows):
     def normalize(num, c):
