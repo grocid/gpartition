@@ -36,12 +36,7 @@ from hashlib import sha1
 # some graphical adjustments needed to make it
 # look properly
 border = 30
-screen = (3840 - 2 * border, 2160 - 3 * border - 80)
-
-# I only have one big-ass monitor. Therefore, this is fixed.
-# It is easy to retrieve the desktop which contains the mouse pointer
-# but this is left as an exercise to the reader.
-desktop = 0
+screen = 3840 - 2 * border, 2160 - 3 * border - 80
 
 # this may be needed to be reconfigured
 xdotool_offset_error = 4, 58
@@ -50,13 +45,22 @@ xdotool_offset_error = 4, 58
 # will identify some programs that can be minimized
 # to find a suitable packing.
 minimize_if_needed = ["spotify", "telegram"]
-layouts_config = "/home/carl/.config/gnoti/layouts.json"
+
+# config directory
+home = os.path.expanduser("~")
+layouts_config = "%s/.config/gpartition/layouts.json" % home
 
 # for sending error somewhere
 devnull = open(os.devnull, 'wb')
 
+
 def notify(msg):
     subprocess.call(["notify-send", "Layouts", str(msg)])
+
+
+def get_desktop():
+    return subprocess.check_output(["xdotool", "get_desktop"]).strip()
+
 
 def get_pos_and_size(id):
     result = subprocess.check_output(["xdotool", "getwindowgeometry", id])
@@ -65,26 +69,38 @@ def get_pos_and_size(id):
     width, height = result[1].strip().split("x")
     return int(x), int(y), int(width), int(height)
 
+
 def get_size(id):
     _, _, width, height = get_pos_and_size(id)
     return width, height
 
+
 def move_window(id, x, y):
     subprocess.call(["xdotool", "windowmove", str(id), str(x), str(y)])
 
+
 def resize_window(id, width, height):
-    subprocess.call(["xdotool", "windowsize", str(id), str(width), str(height)])
+    width -= xdotool_offset_error[0]
+    height -= xdotool_offset_error[1]
+    subprocess.call(
+        ["xdotool", "windowsize", str(id), str(width), str(height)])
+
 
 def get_windows(desktop):
     return subprocess.check_output([
-        "xdotool", "search", "--all", "--onlyvisible", "--desktop", str(desktop), ""
+        "xdotool", "search", "--all", "--onlyvisible", "--desktop", get_desktop(), ""
     ], stderr=devnull).split()
 
+
 def get_name(id):
-    return subprocess.check_output(["xprop", "-id", str(id), "WM_CLASS"]).strip()
+    return subprocess.check_output(
+        ["xprop", "-id", str(id), "WM_CLASS"]
+    ).strip()
+
 
 def minimize(id):
     subprocess.call(["xdotool", "windowminimize", str(id)])
+
 
 def find_minimizable():
     for window_class in minimize_if_needed:
@@ -92,34 +108,39 @@ def find_minimizable():
             return subprocess.check_output([
                 "xdotool", "search", "--onlyvisible", "--class", window_class
             ]).strip().split()
-        except Exception as e:
+        except Exception:
             continue
     return list()
+
 
 def get_window_properties(visible_windows):
     windows = []
     for window in visible_windows:
         x, y, width, height = get_pos_and_size(window)
-        windows.append((sha1(get_name(window)).hexdigest(), x, y, width, height))
+        windows.append(
+            (sha1(get_name(window)).hexdigest(), x, y, width, height))
 
     digests = sorted(map(lambda x: x[0], windows))
     fingerprint = sha1("".join(digests)).hexdigest()
     return windows, fingerprint
+
 
 def learn_layout(visible_windows):
     windows, fingerprint = get_window_properties(visible_windows)
     try:
         with open(layouts_config, "r") as layouts:
             data = json.loads(layouts.read())
-    except:
+    except Exception:
         data = dict()
     try:
         data[fingerprint] = windows
         with open(layouts_config, "w+") as layouts:
             layouts.write(json.dumps(data))
         notify("Layout saved")
-    except:
-        syslog.syslog(syslog.LOG_ERR, "Failed to write to %s." % layouts_config)
+    except Exception:
+        syslog.syslog(syslog.LOG_ERR, "Failed to write to %s." %
+                      layouts_config)
+
 
 def apply_layout(visible_windows):
     windows, fingerprint = get_window_properties(visible_windows)
@@ -128,21 +149,18 @@ def apply_layout(visible_windows):
             data = json.loads(layouts.read())
         layout = data.get(fingerprint)
         assert(layout is not None)
-    except:
+    except Exception:
         return
 
-    visible_windows = get_windows(desktop)
+    visible_windows = get_windows(get_desktop())
     for window in visible_windows:
         window_fingerprint = sha1(get_name(window)).hexdigest()
         # a bit inefficient, but we are not dealing with to many windows
         e = filter(lambda x: x[0] == window_fingerprint, layout)[0]
         layout.remove(e)
-        move_window(
-            window, 
-            e[1] - xdotool_offset_error[0], 
-            e[2] - xdotool_offset_error[1]
-        )
+        move_window(window, e[1], e[2])
         resize_window(window, e[3], e[4])
+
 
 def pack(visible_windows):
     # create a representation of the screen and
@@ -178,10 +196,10 @@ def pack(visible_windows):
     # get bounding box
     mx, my = -1, -1
     for p in packer[0]:
-    	mx = max(p.x + p.width, mx)
-    	my = max(p.y + p.height, my)
+        mx = max(p.x + p.width, mx)
+        my = max(p.y + p.height, my)
 
-   	# center bounding box
+    # center bounding box
     dx = (screen[0] - mx) / 2
     dy = (screen[1] - my) / 2
 
@@ -189,9 +207,10 @@ def pack(visible_windows):
     for p in packer[0]:
         move_window(p.rid, p.x + 3 * border + dx, p.y + 4 * border + dy)
 
+
 def quantize(visible_windows):
     def normalize(num, c):
-        return round(float(num) / border / c)  * border * c
+        return round(float(num) / border / c) * border * c
 
     for window in visible_windows:
         x, y, width, height = get_pos_and_size(window)
@@ -203,13 +222,17 @@ def quantize(visible_windows):
         resize_window(window, width, height)
 
 parser = argparse.ArgumentParser(prog='gtile')
-parser.add_argument('--learn', action='store_true', help='learn current layout')
-parser.add_argument('--apply', action='store_true', help='apply layout to current windows')
-parser.add_argument('--pack', action='store_true', help='attempt to pack windows')
-parser.add_argument('--quantize', action='store_true', help='attempt to quantize windows')
+parser.add_argument('--learn', action='store_true',
+                    help='learn current layout')
+parser.add_argument('--apply', action='store_true',
+                    help='apply layout to current windows')
+parser.add_argument('--pack', action='store_true',
+                    help='attempt to pack windows')
+parser.add_argument('--quantize', action='store_true',
+                    help='attempt to quantize windows')
 args = parser.parse_args()
 
-visible_windows = get_windows(desktop)
+visible_windows = get_windows(get_desktop())
 
 if args.learn:
     learn_layout(visible_windows)
